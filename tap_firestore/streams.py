@@ -22,6 +22,7 @@ class FirestoreStream(Stream):
         name: str,
         replication_key: Optional[str] = None,
         replication_key_type: str = "timestamp",
+        limit: Optional[int] = None,
     ):
         """Initialize the stream.
 
@@ -30,10 +31,12 @@ class FirestoreStream(Stream):
             name: The collection name.
             replication_key: Field to use for incremental replication.
             replication_key_type: Type of replication key ('timestamp' or 'string').
+            limit: Maximum number of documents to extract per sync.
         """
         self.collection_name = name
         self._replication_key = replication_key
         self.replication_key_type = replication_key_type
+        self.limit = limit
         super().__init__(tap=tap, name=name, schema=None)
 
     @property
@@ -184,6 +187,11 @@ class FirestoreStream(Stream):
                 # Use start_after with a document snapshot dict
                 # This is more efficient than where() for pagination
                 query = query.start_after({self.replication_key: starting_value})
+
+        # Apply limit if specified
+        if self.limit:
+            self.logger.info(f"Limiting query to {self.limit} documents")
+            query = query.limit(self.limit)
 
         # Stream documents
         doc_count = 0

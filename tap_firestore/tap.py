@@ -55,6 +55,11 @@ class TapFirestore(Tap):
                         th.StringType,
                         description="Type of replication key: 'timestamp' or 'string' (default: 'timestamp')",
                     ),
+                    th.Property(
+                        "limit",
+                        th.IntegerType,
+                        description="Maximum number of documents to extract per sync (optional, for testing or rate limiting)",
+                    ),
                 )
             ),
             required=True,
@@ -72,6 +77,7 @@ class TapFirestore(Tap):
                 name=collection_config["name"],
                 replication_key=collection_config.get("replication_key"),
                 replication_key_type=collection_config.get("replication_key_type", "timestamp"),
+                limit=collection_config.get("limit"),
             )
 
 
