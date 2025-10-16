@@ -172,21 +172,23 @@ class FirestoreStream(Stream):
 
         # Build query with incremental replication support
         query = collection_ref
+        starting_value = None
 
-        # Order by replication key if specified
         if self.replication_key:
-            query = query.order_by(self.replication_key)
-
             starting_value = self.get_starting_replication_key_value(context)
 
             if starting_value:
                 self.logger.info(
-                    f"Resuming {self.collection_name} from "
-                    f"{self.replication_key}: {starting_value}"
+                    f"Resuming {self.collection_name} where "
+                    f"{self.replication_key} > {starting_value}"
                 )
-                # Use start_after with a document snapshot dict
-                # This is more efficient than where() for pagination
-                query = query.start_after({self.replication_key: starting_value})
+                # Use where() instead of order_by + start_after
+                # This avoids requiring a composite index
+                query = query.where(
+                    filter=firestore.FieldFilter(
+                        self.replication_key, ">", starting_value
+                    )
+                )
 
         # Apply limit if specified
         if self.limit:
