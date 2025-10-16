@@ -1,0 +1,19 @@
+{
+  "project_id": "your-gcp-project-id",
+  "credentials_path": "/path/to/credentials.json",
+  "collections": [
+    {
+      "name": "users",
+      "replication_key": "updated_at",
+      "replication_key_type": "timestamp"
+    },
+    {
+      "name": "orders",
+      "replication_key": "created_at",
+      "replication_key_type": "timestamp"
+    },
+    {
+      "name": "products"
+    }
+  ]
+}

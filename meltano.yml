@@ -1,0 +1,30 @@
+version: 1
+project_id: tap-firestore
+
+plugins:
+  extractors:
+  - name: tap-firestore
+    namespace: tap_firestore
+    pip_url: -e .
+    executable: tap-firestore
+    capabilities:
+    - catalog
+    - state
+    - discover
+    settings:
+    - name: project_id
+      kind: string
+      description: GCP Project ID
+    - name: credentials_path
+      kind: string
+      description: Path to the Firebase credentials JSON file
+    - name: credentials_json
+      kind: password
+      description: Firebase credentials as JSON string (alternative to credentials_path)
+    - name: collections
+      kind: array
+      description: |
+        List of collections to extract. Each collection can have:
+        - name: Collection name (required)
+        - replication_key: Field to use for incremental replication
+        - replication_key_type: Type of replication key ('timestamp' or 'string')
