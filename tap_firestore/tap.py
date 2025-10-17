@@ -36,6 +36,11 @@ class TapFirestore(Tap):
             description="GCP Project ID",
         ),
         th.Property(
+            "stringify_objects",
+            th.BooleanType,
+            description="Serialize object and array fields as JSON strings. Use this if your target has issues with nested VARIANT types (default: false)",
+        ),
+        th.Property(
             "collections",
             th.ArrayType(
                 th.ObjectType(

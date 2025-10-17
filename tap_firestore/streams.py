@@ -59,6 +59,8 @@ class FirestoreStream(Stream):
         Returns:
             Singer type helper.
         """
+        stringify_objects = self.config.get("stringify_objects", False)
+
         if value is None:
             return th.StringType  # Default to string for null values
         elif isinstance(value, bool):
@@ -70,8 +72,12 @@ class FirestoreStream(Stream):
         elif hasattr(value, "isoformat"):  # datetime objects
             return th.DateTimeType
         elif isinstance(value, dict):
-            return th.ObjectType()
+            # If stringify enabled, objects become strings
+            return th.StringType if stringify_objects else th.ObjectType()
         elif isinstance(value, list):
+            # If stringify enabled, arrays become strings
+            if stringify_objects:
+                return th.StringType
             if len(value) > 0:
                 # Infer array item type from first element
                 item_type = self._infer_type(value[0])
@@ -89,14 +95,18 @@ class FirestoreStream(Stream):
         Returns:
             Singer type helper.
         """
+        # Check if objects should be stringified
+        stringify_objects = self.config.get("stringify_objects", False)
+
         type_map = {
             "string": th.StringType,
             "integer": th.IntegerType,
             "number": th.NumberType,
             "boolean": th.BooleanType,
             "datetime": th.DateTimeType,
-            "object": th.ObjectType(),
-            "array": th.ArrayType(th.StringType),
+            # If stringify_objects is enabled, use StringType for objects/arrays
+            "object": th.StringType if stringify_objects else th.ObjectType(),
+            "array": th.StringType if stringify_objects else th.ArrayType(th.StringType),
         }
         return type_map.get(type_str.lower(), th.StringType)
 
@@ -275,11 +285,12 @@ class FirestoreStream(Stream):
             self.logger.error(f"Error creating Firestore client: {e}")
             raise
 
-    def _convert_value(self, value: Any) -> Any:
+    def _convert_value(self, value: Any, stringify_nested: bool = False) -> Any:
         """Convert Firestore values to JSON-serializable types.
 
         Args:
             value: The value to convert.
+            stringify_nested: If True, serialize dicts/lists as JSON strings.
 
         Returns:
             JSON-serializable value.
@@ -292,26 +303,32 @@ class FirestoreStream(Stream):
             return value.isoformat()
         # Handle Firestore GeoPoint
         elif hasattr(value, "latitude") and hasattr(value, "longitude"):
-            return {
+            geo_dict = {
                 "latitude": value.latitude,
                 "longitude": value.longitude
             }
+            return json.dumps(geo_dict) if stringify_nested else geo_dict
         # Handle Firestore DocumentReference
         elif hasattr(value, "path") and hasattr(value, "id"):
             return value.path  # Convert reference to path string
         elif isinstance(value, dict):
-            return {k: self._convert_value(v) for k, v in value.items()}
-        elif isinstance(value, list):
-            return [self._convert_value(item) for item in value]
-        elif isinstance(value, tuple):
-            return [self._convert_value(item) for item in value]
+            # Recursively convert nested values (without stringify)
+            converted_dict = {k: self._convert_value(v, stringify_nested=False) for k, v in value.items()}
+            # Only stringify at the top level if requested
+            return json.dumps(converted_dict) if stringify_nested else converted_dict
+        elif isinstance(value, (list, tuple)):
+            # Recursively convert list items (without stringify)
+            converted_list = [self._convert_value(item, stringify_nested=False) for item in value]
+            # Only stringify at the top level if requested
+            return json.dumps(converted_list) if stringify_nested else converted_list
         elif isinstance(value, bytes):
             return value.decode("utf-8", errors="ignore")
         # Catch any other special Firestore types
         elif hasattr(value, "__dict__") and not isinstance(value, (str, int, float, bool)):
             # Try to convert object to dict
             try:
-                return {k: self._convert_value(v) for k, v in value.__dict__.items() if not k.startswith("_")}
+                converted_obj = {k: self._convert_value(v, stringify_nested=False) for k, v in value.__dict__.items() if not k.startswith("_")}
+                return json.dumps(converted_obj) if stringify_nested else converted_obj
             except:
                 return str(value)
         return value
@@ -399,9 +416,29 @@ class FirestoreStream(Stream):
                     "_sdc_extracted_at": self._get_current_timestamp(),
                 }
 
+                # Check if we should stringify objects
+                stringify_objects = self.config.get("stringify_objects", False)
+
+                # Identify which fields should be stringified
+                fields_to_stringify = set()
+                if stringify_objects and self.schema_config:
+                    # If schema is defined, only stringify fields marked as object/array
+                    for field_name, field_type in self.schema_config.items():
+                        if field_type.lower() in ("object", "array"):
+                            fields_to_stringify.add(field_name)
+
                 # Add all document fields
                 for key, value in doc_dict.items():
-                    record[key] = self._convert_value(value)
+                    # Determine if this specific field should be stringified
+                    should_stringify = stringify_objects and (
+                        # If schema defined: only stringify designated fields
+                        (self.schema_config and key in fields_to_stringify) or
+                        # If no schema: stringify all dicts and lists
+                        (not self.schema_config and isinstance(value, (dict, list)))
+                    )
+
+                    converted_value = self._convert_value(value, stringify_nested=should_stringify)
+                    record[key] = converted_value
 
                 total_extracted += 1
                 last_doc = doc
