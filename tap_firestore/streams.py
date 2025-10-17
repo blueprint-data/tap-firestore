@@ -23,6 +23,8 @@ class FirestoreStream(Stream):
         replication_key: Optional[str] = None,
         replication_key_type: str = "timestamp",
         limit: Optional[int] = None,
+        batch_size: int = 500,
+        schema_config: Optional[dict] = None,
     ):
         """Initialize the stream.
 
@@ -32,11 +34,15 @@ class FirestoreStream(Stream):
             replication_key: Field to use for incremental replication.
             replication_key_type: Type of replication key ('timestamp' or 'string').
             limit: Maximum number of documents to extract per sync.
+            batch_size: Number of documents to fetch per batch (default: 500).
+            schema_config: Optional schema configuration dict (field_name -> type_string).
         """
         self.collection_name = name
         self._replication_key = replication_key
         self.replication_key_type = replication_key_type
         self.limit = limit
+        self.batch_size = batch_size
+        self.schema_config = schema_config
         super().__init__(tap=tap, name=name, schema=None)
 
     @property
@@ -44,12 +50,61 @@ class FirestoreStream(Stream):
         """Return replication key."""
         return self._replication_key
 
-    @property
-    def schema(self) -> dict:
-        """Return dynamic schema.
+    def _infer_type(self, value: Any) -> th.JSONTypeHelper:
+        """Infer Singer type from a Python value.
 
-        Since Firestore is schemaless, we define a flexible schema that includes
-        common fields and allows additional properties.
+        Args:
+            value: The value to infer type from.
+
+        Returns:
+            Singer type helper.
+        """
+        if value is None:
+            return th.StringType  # Default to string for null values
+        elif isinstance(value, bool):
+            return th.BooleanType
+        elif isinstance(value, int):
+            return th.IntegerType
+        elif isinstance(value, float):
+            return th.NumberType
+        elif hasattr(value, "isoformat"):  # datetime objects
+            return th.DateTimeType
+        elif isinstance(value, dict):
+            return th.ObjectType()
+        elif isinstance(value, list):
+            if len(value) > 0:
+                # Infer array item type from first element
+                item_type = self._infer_type(value[0])
+                return th.ArrayType(item_type)
+            return th.ArrayType(th.StringType)  # Default array item type
+        else:
+            return th.StringType
+
+    def _type_string_to_singer_type(self, type_str: str) -> th.JSONTypeHelper:
+        """Convert a type string to a Singer type.
+
+        Args:
+            type_str: Type string (e.g., 'string', 'integer', 'datetime')
+
+        Returns:
+            Singer type helper.
+        """
+        type_map = {
+            "string": th.StringType,
+            "integer": th.IntegerType,
+            "number": th.NumberType,
+            "boolean": th.BooleanType,
+            "datetime": th.DateTimeType,
+            "object": th.ObjectType(),
+            "array": th.ArrayType(th.StringType),
+        }
+        return type_map.get(type_str.lower(), th.StringType)
+
+    def _build_schema_from_config(self) -> dict:
+        """Build schema from provided configuration.
+
+        Returns:
+            Schema dictionary from config.
         """
         properties = {
             "_id": th.StringType,
@@ -63,6 +118,11 @@ class FirestoreStream(Stream):
             else:
                 properties[self.replication_key] = th.StringType
 
+        # Add fields from schema config
+        if self.schema_config:
+            for field_name, field_type in self.schema_config.items():
+                properties[field_name] = self._type_string_to_singer_type(field_type)
+
         schema_dict = th.PropertiesList(
             *[th.Property(k, v) for k, v in properties.items()]
         ).to_dict()
@@ -71,6 +131,84 @@ class FirestoreStream(Stream):
         schema_dict["additionalProperties"] = True
 
         return schema_dict
+
+    def _discover_schema(self) -> dict:
+        """Discover schema by sampling documents from the collection.
+
+        Returns:
+            Schema dictionary with discovered fields.
+        """
+        properties = {
+            "_id": th.StringType,
+            "_sdc_extracted_at": th.DateTimeType,
+        }
+
+        # Add replication key to schema if defined
+        if self.replication_key:
+            if self.replication_key_type == "timestamp":
+                properties[self.replication_key] = th.DateTimeType
+            else:
+                properties[self.replication_key] = th.StringType
+
+        # Sample documents to discover schema
+        try:
+            client = self._get_firestore_client()
+            collection_ref = client.collection(self.collection_name)
+
+            # Sample up to 10 documents to discover fields
+            sample_size = 10
+            sample_docs = list(collection_ref.limit(sample_size).stream())
+
+            self.logger.info(
+                f"Sampled {len(sample_docs)} documents from {self.collection_name} "
+                "for schema discovery"
+            )
+
+            # Collect all field names and types from samples
+            field_types = {}
+            for doc in sample_docs:
+                doc_dict = doc.to_dict()
+                if doc_dict:
+                    for key, value in doc_dict.items():
+                        if key not in field_types:
+                            field_types[key] = self._infer_type(value)
+
+            # Add discovered fields to properties
+            properties.update(field_types)
+
+        except Exception as e:
+            self.logger.warning(
+                f"Could not discover schema for {self.collection_name}: {e}. "
+                "Using minimal schema."
+            )
+
+        schema_dict = th.PropertiesList(
+            *[th.Property(k, v) for k, v in properties.items()]
+        ).to_dict()
+
+        # Allow additional properties since Firestore is schemaless
+        schema_dict["additionalProperties"] = True
+
+        return schema_dict
+
+    @property
+    def schema(self) -> dict:
+        """Return dynamic schema.
+
+        If schema config is provided, use that. Otherwise, discover schema by sampling.
+        """
+        if not hasattr(self, "_schema_cache"):
+            if self.schema_config:
+                self.logger.info(
+                    f"Using provided schema config for {self.collection_name}"
+                )
+                self._schema_cache = self._build_schema_from_config()
+            else:
+                self.logger.info(
+                    f"Auto-discovering schema for {self.collection_name}"
+                )
+                self._schema_cache = self._discover_schema()
+        return self._schema_cache
 
     def _normalize_credentials(self, creds_dict: dict) -> dict:
         """Normalize credentials dictionary to fix common issues.
@@ -170,8 +308,8 @@ class FirestoreStream(Stream):
         client = self._get_firestore_client()
         collection_ref = client.collection(self.collection_name)
 
-        # Build query with incremental replication support
-        query = collection_ref
+        # Build base query with incremental replication support
+        base_query = collection_ref
         starting_value = None
 
         if self.replication_key:
@@ -184,39 +322,76 @@ class FirestoreStream(Stream):
                 )
                 # Use where() instead of order_by + start_after
                 # This avoids requiring a composite index
-                query = query.where(
+                base_query = base_query.where(
                     filter=firestore.FieldFilter(
                         self.replication_key, ">", starting_value
                     )
                 )
 
-        # Apply limit if specified
-        if self.limit:
-            self.logger.info(f"Limiting query to {self.limit} documents")
-            query = query.limit(self.limit)
+        # Paginate through documents to avoid timeouts
+        total_extracted = 0
+        last_doc = None
 
-        # Stream documents
-        doc_count = 0
-        for doc in query.stream():
-            doc_dict = doc.to_dict()
+        self.logger.info(
+            f"Starting extraction with batch_size={self.batch_size}"
+            + (f", limit={self.limit}" if self.limit else "")
+        )
 
-            if doc_dict is None:
-                continue
+        while True:
+            # Build query for this batch
+            query = base_query.order_by("__name__")  # Order by document ID (always indexed)
 
-            # Convert Firestore-specific types
-            record = {
-                "_id": doc.id,
-                "_sdc_extracted_at": self._get_current_timestamp(),
-            }
+            if last_doc:
+                query = query.start_after(last_doc)
 
-            # Add all document fields
-            for key, value in doc_dict.items():
-                record[key] = self._convert_value(value)
+            # Apply batch size
+            batch_limit = self.batch_size
+            if self.limit:
+                remaining = self.limit - total_extracted
+                if remaining <= 0:
+                    break
+                batch_limit = min(batch_limit, remaining)
 
-            doc_count += 1
-            yield record
+            query = query.limit(batch_limit)
 
-        self.logger.info(f"Extracted {doc_count} documents from {self.collection_name}")
+            # Fetch batch
+            docs = list(query.stream())
+
+            if not docs:
+                # No more documents
+                break
+
+            self.logger.info(
+                f"Processing batch of {len(docs)} documents "
+                f"(total: {total_extracted + len(docs)})"
+            )
+
+            # Process documents in this batch
+            for doc in docs:
+                doc_dict = doc.to_dict()
+
+                if doc_dict is None:
+                    continue
+
+                # Convert Firestore-specific types
+                record = {
+                    "_id": doc.id,
+                    "_sdc_extracted_at": self._get_current_timestamp(),
+                }
+
+                # Add all document fields
+                for key, value in doc_dict.items():
+                    record[key] = self._convert_value(value)
+
+                total_extracted += 1
+                last_doc = doc
+                yield record
+
+            # If we got fewer docs than requested, we've reached the end
+            if len(docs) < batch_limit:
+                break
+
+        self.logger.info(f"Extracted {total_extracted} documents from {self.collection_name}")
 
     def _get_current_timestamp(self) -> str:
         """Get current timestamp in ISO format."""

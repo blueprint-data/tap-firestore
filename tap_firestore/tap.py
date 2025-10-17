@@ -60,6 +60,16 @@ class TapFirestore(Tap):
                         th.IntegerType,
                         description="Maximum number of documents to extract per sync (optional, for testing or rate limiting)",
                     ),
+                    th.Property(
+                        "batch_size",
+                        th.IntegerType,
+                        description="Number of documents to fetch per batch to avoid timeouts (default: 500)",
+                    ),
+                    th.Property(
+                        "schema",
+                        th.ObjectType(),
+                        description="Optional schema definition. If provided, skips automatic schema discovery. Format: {'field_name': 'type', ...} where type is one of: string, integer, number, boolean, object, array, datetime",
+                    ),
                 )
             ),
             required=True,
@@ -78,6 +88,8 @@ class TapFirestore(Tap):
                 replication_key=collection_config.get("replication_key"),
                 replication_key_type=collection_config.get("replication_key_type", "timestamp"),
                 limit=collection_config.get("limit"),
+                batch_size=collection_config.get("batch_size", 500),
+                schema_config=collection_config.get("schema"),
             )
 
 
