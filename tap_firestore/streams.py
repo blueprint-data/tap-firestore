@@ -284,16 +284,36 @@ class FirestoreStream(Stream):
         Returns:
             JSON-serializable value.
         """
-        if isinstance(value, firestore.SERVER_TIMESTAMP.__class__):
+        if value is None:
+            return None
+        elif isinstance(value, firestore.SERVER_TIMESTAMP.__class__):
             return None
         elif hasattr(value, "isoformat"):  # datetime objects
             return value.isoformat()
+        # Handle Firestore GeoPoint
+        elif hasattr(value, "latitude") and hasattr(value, "longitude"):
+            return {
+                "latitude": value.latitude,
+                "longitude": value.longitude
+            }
+        # Handle Firestore DocumentReference
+        elif hasattr(value, "path") and hasattr(value, "id"):
+            return value.path  # Convert reference to path string
         elif isinstance(value, dict):
             return {k: self._convert_value(v) for k, v in value.items()}
         elif isinstance(value, list):
             return [self._convert_value(item) for item in value]
+        elif isinstance(value, tuple):
+            return [self._convert_value(item) for item in value]
         elif isinstance(value, bytes):
             return value.decode("utf-8", errors="ignore")
+        # Catch any other special Firestore types
+        elif hasattr(value, "__dict__") and not isinstance(value, (str, int, float, bool)):
+            # Try to convert object to dict
+            try:
+                return {k: self._convert_value(v) for k, v in value.__dict__.items() if not k.startswith("_")}
+            except:
+                return str(value)
         return value
 
     def get_records(self, context: Optional[dict]) -> Iterable[Dict[str, Any]]:
